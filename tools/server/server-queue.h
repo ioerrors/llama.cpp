@@ -17,6 +17,7 @@ private:
     int id = 0;
     bool running  = false;
     bool sleeping = false;
+    bool req_start_sleeping = false;
     bool req_stop_sleeping = false;
     int64_t time_last_task = 0;
 
@@ -44,6 +45,7 @@ private:
     // callback functions
     std::function<bool(server_task &&, bool)> callback_new_task;
     std::function<void(void)>                 callback_update_slots;
+    std::function<bool(void)>                 callback_can_sleep;
     std::vector<std::function<void(bool)>>    callback_sleeping_state;
 
 public:
@@ -64,6 +66,9 @@ public:
     // Call when the state of one slot is changed, it will move one task from deferred to main queue
     // prioritize tasks that use the specified slot (otherwise, pop the first deferred task)
     void pop_deferred_task(int id_slot);
+
+    // Request sleep as soon as active inference is finished.
+    void request_sleep();
 
     // if sleeping, request exiting sleep state and wait until it is done
     // returns immediately if not sleeping
@@ -125,6 +130,11 @@ public:
     // Register the function to be called when all slots data is ready to be processed
     void on_update_slots(std::function<void(void)> callback) {
         callback_update_slots = std::move(callback);
+    }
+
+    // Return true when it is safe to unload the model.
+    void on_can_sleep(std::function<bool(void)> callback) {
+        callback_can_sleep = std::move(callback);
     }
 
     // Register callback for sleeping state change; multiple callbacks are allowed

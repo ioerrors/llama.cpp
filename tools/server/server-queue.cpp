@@ -112,6 +112,18 @@ void server_queue::pop_deferred_task(int id_slot) {
     condition_tasks.notify_one();
 }
 
+void server_queue::request_sleep() {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+
+    if (sleeping || req_start_sleeping) {
+        return;
+    }
+
+    QUE_DBG("%s", "requesting to start sleeping\n");
+    req_start_sleeping = true;
+    condition_tasks.notify_one();
+}
+
 void server_queue::wait_until_no_sleep() {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     if (!sleeping) {
@@ -289,6 +301,12 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
     constexpr auto max_wait_time = std::chrono::seconds(1);
     auto should_sleep = [&]() -> bool {
         // caller must hold mutex_tasks
+
+        // Explicit sleep bypasses the idle timer, but not active inference.
+        if (req_start_sleeping) {
+            return callback_can_sleep && callback_can_sleep();
+        }
+
         if (idle_sleep_ms < 0) {
             return false;
         }
@@ -327,6 +345,7 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
             if (should_sleep()) {
                 QUE_INF("%s", "entering sleeping state\n");
                 sleeping = true;
+                req_start_sleeping = false;
                 // Call order cb0 -> cb1 -> cb{N}
                 for (auto & cb : callback_sleeping_state) {
                     cb(true);
@@ -352,7 +371,7 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
             } else {
                 // wait for new tasks or timeout for checking sleeping condition
                 bool res = condition_tasks.wait_for(lock, max_wait_time, [&]{
-                    return (!queue_tasks.empty() || !running);
+                    return (!queue_tasks.empty() || !running || req_start_sleeping);
                 });
                 if (res) {
                     break; // new task arrived or terminate

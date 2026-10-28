@@ -1074,6 +1074,7 @@ private:
     // use server_context methods instead
 
     common_params params_base;
+    uint32_t fitted_n_ctx = 0;
 
     // note: keep these alive - they determine the lifetime of the model, context, etc.
     common_init_result_ptr llama_init;
@@ -1159,6 +1160,12 @@ private:
             destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
+
+            // Fit only on initial load; reuse its result on wake.
+            if (fitted_n_ctx > 0) {
+                params_base.n_ctx = fitted_n_ctx;
+                params_base.fit_params = false;
+            }
             if (!load_model(params_base)) {
                 GGML_ABORT("failed to reload model after sleeping");
             }
@@ -1315,6 +1322,11 @@ private:
         if (ctx_tgt == nullptr) {
             SRV_ERR("failed to create_context with model '%s'\n", params_base.model.path.c_str());
             return false;
+        }
+
+        // Save the context actually selected by --fit.
+        if (!is_resume && params_base.fit_params) {
+            fitted_n_ctx = llama_n_ctx(ctx_tgt);
         }
 
         vocab = llama_model_get_vocab(model_tgt);
@@ -1653,6 +1665,14 @@ private:
         });
         queue_tasks.on_update_slots([this]() {
             update_slots();
+        });
+        queue_tasks.on_can_sleep([this]() {
+            for (const server_slot & slot : slots) {
+                if (slot.is_processing()) {
+                    return false;
+                }
+            }
+            return true;
         });
         queue_tasks.on_sleeping_state([this](bool sleeping) {
             handle_sleeping_state(sleeping);
@@ -5272,8 +5292,9 @@ struct server_res_generator : server_res_spipe {
     server_response_reader rd;
     server_res_generator(server_queue & queue_tasks, server_response & queue_results, int sleep_idle_seconds, bool bypass_sleep = false)
             : rd(queue_tasks, queue_results, HTTP_POLLING_SECONDS) {
-        // fast path in case sleeping is disabled
-        bypass_sleep |= sleep_idle_seconds < 0;
+        // Forced /sleep can put the server to sleep even when idle sleeping is disabled.
+        // Only explicitly sleep-safe routes may bypass the wake barrier.
+        (void) sleep_idle_seconds;
         if (!bypass_sleep) {
             queue_tasks.wait_until_no_sleep();
         }
@@ -5872,6 +5893,19 @@ void server_routes::init_routes() {
         } else {
             res->ok(get_res_props(*meta, params, false));
         }
+        return res;
+    };
+
+    this->post_sleep = [this](const server_http_req &) {
+        // Bypass normal wake-on-request behavior.
+        auto res = create_response(true);
+
+        queue_tasks.request_sleep();
+
+        res->ok({
+            { "success", true },
+            { "is_sleeping", queue_tasks.is_sleeping() },
+        });
         return res;
     };
 
